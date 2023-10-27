@@ -1,31 +1,6 @@
-use std::io::Read;
-
-use anyhow::Ok;
+use crate::core::lzhuf::{F, MAX_FREQ, N, N_CHAR, R, T, THRESHOLD};
 use byteorder::{LittleEndian, ReadBytesExt};
-
-const N: usize = 4096;
-const F: usize = 60;
-const THRESHOLD: usize = 2;
-const NIL: usize = N;
-
-const N_CHAR: usize = 256 - THRESHOLD + F;
-const T: usize = N_CHAR * 2 - 1;
-const R: usize = T - 1;
-const MAX_FREQ: u32 = 0x4000;
-
-const P_LEN: [u8; 64] = [
-    0x00, 0x20, 0x30, 0x40, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x94, 0x98, 0x9C,
-    0xA0, 0xA4, 0xA8, 0xAC, 0xB0, 0xB4, 0xB8, 0xBC, 0xC0, 0xC2, 0xC4, 0xC6, 0xC8, 0xCA, 0xCC, 0xCE,
-    0xD0, 0xD2, 0xD4, 0xD6, 0xD8, 0xDA, 0xDC, 0xDE, 0xE0, 0xE2, 0xE4, 0xE6, 0xE8, 0xEA, 0xEC, 0xEE,
-    0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
-];
-
-const P_CODE: [u8; 64] = [
-    0x03, 0x04, 0x04, 0x04, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x06, 0x06, 0x06, 0x06,
-    0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
-    0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
-    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
-];
+use std::io::Read;
 
 const D_CODE: [u8; 256] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -64,18 +39,11 @@ const D_LEN: [u8; 256] = [
     0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
 ];
 
-struct Decoder<R: Read> {
+pub struct Decoder<R: Read> {
     reader: R,
     output: Vec<u8>,
     out_position: usize,
     text_buf: [u8; N + F],
-    match_position: i32,
-    match_length: i32,
-    lson: [i32; N + 1],
-    rson: [i32; N + 257],
-    dad: [i32; N + 1],
-    code: u32,
-    len: u32,
     /// frequency table
     freq: [u32; T + 1],
     /// pointers to parent nodes,
@@ -87,40 +55,29 @@ struct Decoder<R: Read> {
     tim_size: u32,
     get_buf: u32,
     get_len: u32,
-    put_buf: u32,
-    put_len: u32,
 }
 
 impl<R: Read> Decoder<R> {
-    fn new(reader: R) -> Decoder<R> {
+    pub fn new(reader: R) -> Decoder<R> {
         Decoder {
             reader,
             output: Vec::new(),
             out_position: 0,
             text_buf: [0; N + F],
-            match_position: 0,
-            match_length: 0,
-            lson: [0; N + 1],
-            rson: [0; N + 257],
-            dad: [0; N + 1],
-            code: 0,
-            len: 0,
             freq: [0; T + 1],
             parent: [0; T + N_CHAR + 1],
             son: [0; T],
             tim_size: 0,
             get_buf: 0,
             get_len: 0,
-            put_buf: 0,
-            put_len: 0,
         }
     }
 
-    fn decode(&mut self) -> anyhow::Result<()> {
+    pub fn decode(mut self) -> anyhow::Result<Vec<u8>> {
         let text_size = self.reader.read_u32::<LittleEndian>()?;
 
         if text_size == 0 {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         self.init_output(text_size)?;
@@ -156,7 +113,7 @@ impl<R: Read> Decoder<R> {
 
         self.tim_size = count;
 
-        Ok(())
+        Ok(self.output)
     }
 
     fn init_output(&mut self, text_size: u32) -> anyhow::Result<()> {
@@ -227,15 +184,13 @@ impl<R: Read> Decoder<R> {
     }
 
     fn get_bit(&mut self) -> u32 {
-        let mut i = 0;
-
         while self.get_len <= 8 {
-            i = self.getb();
+            let i = self.getb();
             self.get_buf |= i << (8 - self.get_len);
             self.get_len += 8;
         }
 
-        i = self.get_buf;
+        let i = self.get_buf;
         self.get_buf <<= 1;
         self.get_len -= 1;
 
@@ -243,15 +198,13 @@ impl<R: Read> Decoder<R> {
     }
 
     fn get_byte(&mut self) -> u32 {
-        let mut i = 0;
-
         while self.get_len <= 8 {
-            i = self.getb();
+            let i = self.getb();
             self.get_buf |= i << (8 - self.get_len);
             self.get_len += 8;
         }
 
-        i = self.get_buf;
+        let i = self.get_buf;
         self.get_buf <<= 8;
         self.get_len -= 8;
 
@@ -348,8 +301,17 @@ impl<R: Read> Decoder<R> {
     }
 }
 
-pub fn decompress<R: Read>(reader: R) -> anyhow::Result<Vec<u8>> {
-    let mut decoder = Decoder::new(reader);
-    decoder.decode()?;
-    Ok(decoder.output)
+#[cfg(test)]
+mod test {
+    use super::Decoder;
+
+    const encoded_data: &[u8] = include_bytes!("test_data_lzh");
+    const decoded_data: &[u8] = include_bytes!("test_data");
+
+    #[test]
+    fn test_decode() {
+        let test_decoded = Decoder::new(encoded_data).decode().unwrap();
+
+        assert_eq!(test_decoded, decoded_data);
+    }
 }
