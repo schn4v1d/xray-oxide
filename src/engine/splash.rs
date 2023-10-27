@@ -1,4 +1,3 @@
-use byteorder::LittleEndian;
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
