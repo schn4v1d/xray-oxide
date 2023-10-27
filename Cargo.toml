@@ -26,9 +26,10 @@ softbuffer = "0.3.2"
 thiserror = "1.0.50"
 winit = { version = "0.29.2", features = ["rwh_05"] }
 thread-local-panic-hook = "0.1.0"
-# bevy = { version = "0.11", features = ["dynamic_linking"] }
 local-encoding = "0.2.0"
 rayon = "1.8"
+wgpu = "0.18"
+pollster = "0.3"
 
 [build-dependencies]
 cfg_aliases = "0.1"
