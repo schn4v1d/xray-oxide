@@ -305,13 +305,13 @@ impl<R: Read> Decoder<R> {
 mod test {
     use super::Decoder;
 
-    const encoded_data: &[u8] = include_bytes!("test_data_lzh");
-    const decoded_data: &[u8] = include_bytes!("test_data");
+    const ENCODED_DATA: &[u8] = include_bytes!("test_data_lzh");
+    const DECODED_DATA: &[u8] = include_bytes!("test_data");
 
     #[test]
     fn test_decode() {
-        let test_decoded = Decoder::new(encoded_data).decode().unwrap();
+        let test_decoded = Decoder::new(ENCODED_DATA).decode().unwrap();
 
-        assert_eq!(test_decoded, decoded_data);
+        assert_eq!(test_decoded, DECODED_DATA);
     }
 }
