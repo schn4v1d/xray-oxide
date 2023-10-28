@@ -1,12 +1,6 @@
 use thiserror::Error;
-use winit::dpi::PhysicalSize;
-use winit::window::Window;
-
-pub trait Renderer {
-    fn window(&self) -> &Window;
-    fn resize(&mut self, new_size: Option<PhysicalSize<u32>>);
-    fn render(&mut self) -> anyhow::Result<()>;
-}
+use winit::{dpi::PhysicalSize, window::Window};
+use xray_oxide_render::Renderer;
 
 #[derive(Debug, Error)]
 pub enum RendererError {
@@ -77,6 +71,69 @@ impl WgpuRenderer {
 
         surface.configure(&device, &config);
 
+        let text = r#"
+            #include "common.h"
+#include "shared\cloudconfig.h"
+
+struct 	vi
+{
+	float4	p		: POSITION;
+	float4	dir		: COLOR0;	// dir0,dir1(w<->z)
+	float4	color	: COLOR1;	// rgb. intensity
+};
+
+struct 	vf
+{
+	float4	color	: COLOR0;	// rgb. intensity, for SM3 - tonemap-prescaled, HI-res
+  	float2	tc0		: TEXCOORD0;
+  	float2	tc1		: TEXCOORD1;
+	float4 	hpos	: SV_Position;
+};
+
+vf main (vi v)
+{
+	vf 		o;
+
+	o.hpos 		= mul		(m_WVP, v.p);	// xform, input in world coords
+
+	// generate tcs
+	float2  d0	= v.dir.xy*2-1;
+	float2  d1	= v.dir.wz*2-1;
+	float2 	_0	= v.p.xz * CLOUD_TILE0 + d0*timers.z*CLOUD_SPEED0;
+	float2 	_1	= v.p.xz * CLOUD_TILE1 + d1*timers.z*CLOUD_SPEED1;
+	o.tc0		= _0;					// copy tc
+	o.tc1		= _1;					// copy tc
+
+	o.color		=	v.color	;			// copy color, low precision, cannot prescale even by 2
+	o.color.w	*= 	pow		(v.p.y,25);
+
+	float	scale	= s_tonemap.Load( int3(0,0,0) ).x;
+
+	o.color.rgb 	*= 	scale	;		// high precision
+
+	return o;
+}
+        "#;
+
+        match hassle_rs::compile_hlsl(
+            r"G:\Anomaly\tools\_unpacked\shaders\r3\clouds.vs",
+            text,
+            "main",
+            "vs_6_0",
+            &["-spirv"],
+            &[],
+        ) {
+            Ok(code) => {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("shader"),
+                    source: wgpu::util::make_spirv(&code),
+                });
+            }
+            Err(e) => {
+                log::error!("{}", e);
+            }
+        }
+
         Ok(WgpuRenderer {
             window,
             surface,
@@ -86,24 +143,8 @@ impl WgpuRenderer {
             size,
         })
     }
-}
 
-impl Renderer for WgpuRenderer {
-    fn window(&self) -> &Window {
-        &self.window
-    }
-
-    fn resize(&mut self, new_size: Option<PhysicalSize<u32>>) {
-        let new_size = new_size.unwrap_or(self.size);
-        if new_size.width > 0 && new_size.height > 0 {
-            self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
-        }
-    }
-
-    fn render(&mut self) -> anyhow::Result<()> {
+    fn render_impl(&mut self) -> anyhow::Result<()> {
         let output = self.surface.get_current_texture()?;
 
         let view = output
@@ -142,5 +183,39 @@ impl Renderer for WgpuRenderer {
         output.present();
 
         Ok(())
+    }
+}
+
+impl Renderer for WgpuRenderer {
+    fn window(&self) -> &Window {
+        &self.window
+    }
+
+    fn resize(&mut self, new_size: Option<PhysicalSize<u32>>) {
+        let new_size = new_size.unwrap_or(self.size);
+        if new_size.width > 0 && new_size.height > 0 {
+            self.size = new_size;
+            self.config.width = new_size.width;
+            self.config.height = new_size.height;
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
+
+    fn render(&mut self) -> anyhow::Result<()> {
+        match self.render_impl() {
+            Ok(_) => Ok(()),
+            Err(e) => match e.downcast_ref::<wgpu::SurfaceError>() {
+                Some(wgpu::SurfaceError::Lost) => {
+                    self.resize(None);
+                    Ok(())
+                }
+                Some(wgpu::SurfaceError::OutOfMemory) => Err(e),
+                Some(e) => {
+                    eprintln!("{e:?}");
+                    Ok(())
+                }
+                _ => Err(e),
+            },
+        }
     }
 }

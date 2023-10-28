@@ -1,0 +1,23 @@
+[package]
+name = "xray-oxide-engine"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+xray-oxide-core = { path = "../xray-oxide-core" }
+xray-oxide-render = { path = "../xray-oxide-render" }
+xray-oxide-render-wgpu = { path = "../xray-oxide-render-wgpu" }
+
+anyhow = "1.0"
+log = "0.4"
+winit = { version = "0.29", features = ["rwh_05"] }
+simple_logger = "4.2"
+thread-local-panic-hook = "0.1"
+pollster = "0.3"
+image = "0.24"
+softbuffer = "0.3"
+
+[build-dependencies]
+cfg_aliases = "0.1"

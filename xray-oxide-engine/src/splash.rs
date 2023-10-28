@@ -1,15 +1,16 @@
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
-use image::io::Reader as ImageReader;
-use image::{ImageFormat, RgbImage};
-use winit::dpi::LogicalSize;
-use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
-use winit::window::{Window, WindowBuilder, WindowId, WindowLevel};
+use image::{io::Reader as ImageReader, ImageFormat, RgbImage};
+use winit::{
+    dpi::LogicalSize,
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    platform::run_on_demand::EventLoopExtRunOnDemand,
+    window::{Window, WindowBuilder, WindowId, WindowLevel},
+};
 
-use crate::engine::ext::WindowExt;
+use crate::ext::WindowExt;
 
 const WIDTH: u32 = 500;
 const HEIGHT: u32 = 268;

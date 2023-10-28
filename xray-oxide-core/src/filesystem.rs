@@ -13,7 +13,7 @@ use ini::Ini;
 use local_encoding::{Encoder, Encoding};
 use thiserror::Error;
 
-use crate::core::{
+use crate::{
     ext::{MetadataExt, StrExt},
     lzhuf,
 };

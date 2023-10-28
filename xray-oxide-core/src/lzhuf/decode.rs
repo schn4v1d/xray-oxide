@@ -1,4 +1,4 @@
-use crate::core::lzhuf::{F, MAX_FREQ, N, N_CHAR, R, T, THRESHOLD};
+use super::{F, MAX_FREQ, N, N_CHAR, R, T, THRESHOLD};
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::Read;
 

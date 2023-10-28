@@ -1,0 +1,17 @@
+[package]
+name = "xray-oxide-core"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+byteorder = "1.5.0"
+rust-ini = "0.20.0"
+thiserror = "1.0.50"
+local-encoding = "0.2.0"
+log = "0.4"
+
+[build-dependencies]
+cfg_aliases = "0.1"

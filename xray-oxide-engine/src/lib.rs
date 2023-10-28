@@ -2,12 +2,17 @@ use std::thread;
 use std::time::Instant;
 
 use simple_logger::SimpleLogger;
-use winit::event::{Event, WindowEvent};
-use winit::window::Window;
-use winit::{dpi::LogicalSize, event_loop::EventLoop, window::WindowBuilder};
+use winit::{
+    dpi::LogicalSize,
+    event::{Event, WindowEvent},
+    event_loop::EventLoop,
+    window::{Window, WindowBuilder},
+};
+use xray_oxide_core::filesystem::Filesystem;
+use xray_oxide_render::Renderer;
+use xray_oxide_render_wgpu::WgpuRenderer;
 
-use crate::render::{Renderer, WgpuRenderer};
-use crate::{core::filesystem::Filesystem, engine::ext::WindowExt};
+use crate::ext::WindowExt;
 
 pub mod ext;
 pub mod splash;
@@ -73,18 +78,11 @@ pub fn entry_point() -> anyhow::Result<()> {
                     WindowEvent::CloseRequested => {
                         target.exit();
                     }
-                    WindowEvent::RedrawRequested => match xray.renderer.render() {
-                        Ok(_) => {}
-                        Err(e) => match e.downcast_ref::<wgpu::SurfaceError>() {
-                            Some(wgpu::SurfaceError::Lost) => xray.renderer.resize(None),
-                            Some(wgpu::SurfaceError::OutOfMemory) => {
-                                eprintln!("Out of Memory!");
-                                target.exit()
-                            }
-                            Some(e) => eprintln!("{e:?}"),
-                            None => eprintln!("{e:?}"),
-                        },
-                    },
+                    WindowEvent::RedrawRequested => {
+                        if let Err(_) = xray.renderer.render() {
+                            target.exit();
+                        }
+                    }
                     WindowEvent::Resized(new_size) => {
                         xray.renderer.resize(Some(new_size));
                     }

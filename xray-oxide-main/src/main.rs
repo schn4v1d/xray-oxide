@@ -1,13 +1,6 @@
 #[cfg(desktop)]
-pub mod core;
-#[cfg(desktop)]
-pub mod engine;
-#[cfg(desktop)]
-pub mod render;
-
-#[cfg(desktop)]
 fn main() -> anyhow::Result<()> {
-    engine::entry_point()
+    xray_oxide_engine::entry_point()
 }
 
 #[cfg(not(desktop))]
