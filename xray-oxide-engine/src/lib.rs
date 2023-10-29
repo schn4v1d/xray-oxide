@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -107,12 +108,14 @@ pub struct XRay {
     pub levels: Vec<LevelInfo>,
     pub current_level: Option<usize>,
     loading_screen: Option<()>,
-    filesystem: Filesystem,
+    filesystem: Arc<Filesystem>,
     renderer: Box<dyn Renderer + Send>,
 }
 
 impl XRay {
     pub fn new(window: Window) -> anyhow::Result<XRay> {
+        let filesystem = Arc::new(Filesystem::new()?);
+
         let mut app = XRay {
             loaded: false,
             ll_dwReference: 0,
@@ -120,8 +123,8 @@ impl XRay {
             levels: Vec::new(),
             current_level: None,
             loading_screen: None,
-            filesystem: Filesystem::new()?,
-            renderer: select_renderer(window)?,
+            renderer: select_renderer(window, filesystem.clone())?,
+            filesystem,
         };
 
         app.level_scan();
@@ -134,8 +137,11 @@ impl XRay {
     }
 }
 
-fn select_renderer(window: Window) -> anyhow::Result<Box<dyn Renderer + Send>> {
-    let renderer = Box::new(pollster::block_on(WgpuRenderer::new(window))?);
+fn select_renderer(
+    window: Window,
+    filesystem: Arc<Filesystem>,
+) -> anyhow::Result<Box<dyn Renderer + Send>> {
+    let renderer = Box::new(pollster::block_on(WgpuRenderer::new(window, filesystem))?);
 
     Ok(renderer)
 }

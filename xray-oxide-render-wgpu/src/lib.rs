@@ -1,5 +1,9 @@
+use hassle_rs::{Dxc, DxcIncludeHandler, HassleError};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 use winit::{dpi::PhysicalSize, window::Window};
+use xray_oxide_core::filesystem::Filesystem;
 use xray_oxide_render::Renderer;
 
 #[derive(Debug, Error)]
@@ -8,17 +12,41 @@ pub enum RendererError {
     NoGPUFound,
 }
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 4],
+    tex_coords: [f32; 2],
+    color: [f32; 4],
+}
+
+impl Vertex {
+    const ATTRIBS: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2, 2 => Float32x4];
+
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBS,
+        }
+    }
+}
+
 pub struct WgpuRenderer {
+    filesystem: Arc<Filesystem>,
     surface: wgpu::Surface,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: PhysicalSize<u32>,
     window: Window,
+    render_pipeline: wgpu::RenderPipeline,
+    diffuse_bind_group: wgpu::BindGroup,
 }
 
 impl WgpuRenderer {
-    pub async fn new(window: Window) -> anyhow::Result<WgpuRenderer> {
+    pub async fn new(window: Window, filesystem: Arc<Filesystem>) -> anyhow::Result<WgpuRenderer> {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -71,76 +99,128 @@ impl WgpuRenderer {
 
         surface.configure(&device, &config);
 
-        let text = r#"
-            #include "common.h"
-#include "shared\cloudconfig.h"
+        let texture_size = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
 
-struct 	vi
-{
-	float4	p		: POSITION;
-	float4	dir		: COLOR0;	// dir0,dir1(w<->z)
-	float4	color	: COLOR1;	// rgb. intensity
-};
+        let diffuse_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
 
-struct 	vf
-{
-	float4	color	: COLOR0;	// rgb. intensity, for SM3 - tonemap-prescaled, HI-res
-  	float2	tc0		: TEXCOORD0;
-  	float2	tc1		: TEXCOORD1;
-	float4 	hpos	: SV_Position;
-};
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &diffuse_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0, 0, 0, 0],
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            texture_size,
+        );
 
-vf main (vi v)
-{
-	vf 		o;
+        let diffuse_texture_view =
+            diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-	o.hpos 		= mul		(m_WVP, v.p);	// xform, input in world coords
+        let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
-	// generate tcs
-	float2  d0	= v.dir.xy*2-1;
-	float2  d1	= v.dir.wz*2-1;
-	float2 	_0	= v.p.xz * CLOUD_TILE0 + d0*timers.z*CLOUD_SPEED0;
-	float2 	_1	= v.p.xz * CLOUD_TILE1 + d1*timers.z*CLOUD_SPEED1;
-	o.tc0		= _0;					// copy tc
-	o.tc1		= _1;					// copy tc
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("texture_bind_group_layout"),
+            });
 
-	o.color		=	v.color	;			// copy color, low precision, cannot prescale even by 2
-	o.color.w	*= 	pow		(v.p.y,25);
+        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                },
+            ],
+            label: Some("diffuse_bind_group"),
+        });
 
-	float	scale	= s_tonemap.Load( int3(0,0,0) ).x;
+        let vertex_shader_module =
+            create_vertex_shader_module(&device, &filesystem, "stub_default")?;
 
-	o.color.rgb 	*= 	scale	;		// high precision
+        let fragment_shader_module =
+            create_fragment_shader_module(&device, &filesystem, "stub_default")?;
 
-	return o;
-}
-        "#;
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layouy"),
+                bind_group_layouts: &[&texture_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
-        match hassle_rs::compile_hlsl(
-            r"G:\Anomaly\tools\_unpacked\shaders\r3\clouds.vs",
-            text,
-            "main",
-            "vs_6_0",
-            &["-spirv"],
-            &[],
-        ) {
-            Ok(code) => {
-                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("shader"),
-                    source: wgpu::util::make_spirv(&code),
-                });
-            }
-            Err(e) => {
-                log::error!("{}", e);
-            }
-        }
+        let render_pipeline = create_render_pipeline(
+            &device,
+            Some("Render Pipeline"),
+            &render_pipeline_layout,
+            (&vertex_shader_module, &[Vertex::desc()]),
+            (
+                &fragment_shader_module,
+                &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            ),
+        );
 
         Ok(WgpuRenderer {
+            filesystem,
             window,
             surface,
             device,
             queue,
             config,
             size,
+            render_pipeline,
+            diffuse_bind_group,
         })
     }
 
@@ -158,7 +238,7 @@ vf main (vi v)
             });
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -177,6 +257,10 @@ vf main (vi v)
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -184,6 +268,171 @@ vf main (vi v)
 
         Ok(())
     }
+}
+
+pub struct ShaderModule {
+    pub module: wgpu::ShaderModule,
+    pub entry_point: String,
+}
+
+struct IncludeHandler<'a> {
+    filesystem: &'a Filesystem,
+}
+
+impl<'a> DxcIncludeHandler for IncludeHandler<'a> {
+    fn load_source(&mut self, filename: String) -> Option<String> {
+        let filename = if cfg!(windows) {
+            filename.replace('/', "\\")
+        } else {
+            filename
+        };
+
+        self.filesystem.read_to_string(filename).ok()
+    }
+}
+
+fn create_shader_module<P: AsRef<Path>, F: Fn(&str) -> (&str, &str)>(
+    device: &wgpu::Device,
+    filesystem: &Filesystem,
+    shader_path: P,
+    get_params: F,
+) -> anyhow::Result<ShaderModule> {
+    let mut path = filesystem.append_path("$game_shaders$", "r3").unwrap();
+    path.push(shader_path.as_ref());
+
+    let shader_code = filesystem.read_to_string(&path)?;
+
+    let (target_profile, entry_point) = get_params(&shader_code);
+
+    let dxc = Dxc::new(None)?;
+
+    let compiler = dxc.create_compiler()?;
+    let library = dxc.create_library()?;
+
+    let blob = library.create_blob_with_encoding_from_str(&shader_code)?;
+
+    let spirv = match compiler.compile(
+        &blob,
+        path.to_str().unwrap(),
+        entry_point,
+        target_profile,
+        &["-spirv"],
+        Some(&mut IncludeHandler { filesystem }),
+        &[],
+    ) {
+        Err(result) => {
+            let error_blob = result.0.get_error_buffer()?;
+            Err(HassleError::CompileError(
+                library.get_blob_as_string(&error_blob.into())?,
+            ))
+        }
+        Ok(result) => {
+            let result_blob = result.get_result()?;
+
+            Ok(result_blob.to_vec())
+        }
+    }?;
+
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: shader_path.as_ref().to_str(),
+        source: wgpu::util::make_spirv(&spirv),
+    });
+
+    Ok(ShaderModule {
+        module,
+        entry_point: entry_point.to_owned(),
+    })
+}
+
+fn create_vertex_shader_module<P: AsRef<Path>>(
+    device: &wgpu::Device,
+    filesystem: &Filesystem,
+    shader_path: P,
+) -> anyhow::Result<ShaderModule> {
+    create_shader_module(
+        device,
+        filesystem,
+        shader_path.as_ref().with_extension("vs"),
+        |code| {
+            let entry = if code.contains("main_vs_1_1") {
+                "main_vs_1_1"
+            } else if code.contains("main_vs_2_0") {
+                "main_vs_2_0"
+            } else {
+                "main"
+            };
+
+            ("vs_5_0", entry)
+        },
+    )
+}
+
+fn create_fragment_shader_module<P: AsRef<Path>>(
+    device: &wgpu::Device,
+    filesystem: &Filesystem,
+    shader_path: P,
+) -> anyhow::Result<ShaderModule> {
+    create_shader_module(
+        device,
+        filesystem,
+        shader_path.as_ref().with_extension("ps"),
+        |code| {
+            let entry = if code.contains("main_ps_1_1") {
+                "main_ps_1_1"
+            } else if code.contains("main_ps_1_2") {
+                "main_ps_1_2"
+            } else if code.contains("main_ps_1_3") {
+                "main_ps_1_3"
+            } else if code.contains("main_ps_1_4") {
+                "main_ps_1_4"
+            } else if code.contains("main_ps_2_0") {
+                "main_ps_2_0"
+            } else {
+                "main"
+            };
+
+            ("ps_5_0", entry)
+        },
+    )
+}
+
+fn create_render_pipeline(
+    device: &wgpu::Device,
+    label: Option<&str>,
+    layout: &wgpu::PipelineLayout,
+    vertex: (&ShaderModule, &[wgpu::VertexBufferLayout]),
+    fragment: (&ShaderModule, &[Option<wgpu::ColorTargetState>]),
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label,
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &vertex.0.module,
+            entry_point: &vertex.0.entry_point,
+            buffers: vertex.1,
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &fragment.0.module,
+            entry_point: &fragment.0.entry_point,
+            targets: fragment.1,
+        }),
+        multiview: None,
+    })
 }
 
 impl Renderer for WgpuRenderer {

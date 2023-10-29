@@ -12,6 +12,8 @@ rust-ini = "0.20.0"
 thiserror = "1.0.50"
 local-encoding = "0.2.0"
 log = "0.4"
+memmap2 = "0.9"
+lzo1x-1 = "0.1.0"
 
 [build-dependencies]
 cfg_aliases = "0.1"

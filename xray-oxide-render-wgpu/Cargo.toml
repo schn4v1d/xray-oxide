@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+xray-oxide-core = { path = "../xray-oxide-core" }
 xray-oxide-render = { path = "../xray-oxide-render" }
 
 anyhow = "1.0"
@@ -14,3 +15,4 @@ wgpu = { version = "0.18", features = ["spirv"] }
 thiserror = "1.0"
 hassle-rs = "0.10"
 log = "0.4"
+bytemuck = { version = "1.14", features = ["derive"] }
