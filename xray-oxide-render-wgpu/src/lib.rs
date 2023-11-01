@@ -1,7 +1,9 @@
+use cgmath::SquareMatrix;
 use hassle_rs::{Dxc, DxcIncludeHandler, HassleError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 use xray_oxide_core::filesystem::Filesystem;
 use xray_oxide_render::Renderer;
@@ -33,6 +35,36 @@ impl Vertex {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DynamicTransforms {
+    matrix_world_view_projection: [[f32; 4]; 4],
+    matrix_world_view: [[f32; 4]; 4],
+    matrix_world: [[f32; 4]; 4],
+
+    /// ?
+    L_material: [f32; 4],
+    hemi_cube_pos_faces: [f32; 4],
+    hemi_cube_neg_faces: [f32; 4],
+    /// ?
+    dt_params: [f32; 4],
+}
+
+impl DynamicTransforms {
+    fn new() -> DynamicTransforms {
+        DynamicTransforms {
+            matrix_world_view_projection: cgmath::Matrix4::identity().into(),
+            matrix_world_view: cgmath::Matrix4::identity().into(),
+            matrix_world: cgmath::Matrix4::identity().into(),
+
+            L_material: [0.0; 4],
+            hemi_cube_pos_faces: [0.0; 4],
+            hemi_cube_neg_faces: [0.0; 4],
+            dt_params: [0.0; 4],
+        }
+    }
+}
+
 pub struct WgpuRenderer {
     filesystem: Arc<Filesystem>,
     surface: wgpu::Surface,
@@ -42,7 +74,10 @@ pub struct WgpuRenderer {
     size: PhysicalSize<u32>,
     window: Window,
     render_pipeline: wgpu::RenderPipeline,
-    diffuse_bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    dynamic_transforms: DynamicTransforms,
+    dynamic_transforms_buffer: wgpu::Buffer,
+    dynamic_transforms_bind_group: wgpu::BindGroup,
 }
 
 impl WgpuRenderer {
@@ -51,9 +86,9 @@ impl WgpuRenderer {
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            flags: Default::default(),
+            // flags: Default::default(),
             dx12_shader_compiler: Default::default(),
-            gles_minor_version: Default::default(),
+            // gles_minor_version: Default::default(),
         });
 
         let surface = unsafe { instance.create_surface(&window)? };
@@ -145,11 +180,37 @@ impl WgpuRenderer {
             ..Default::default()
         });
 
-        let texture_bind_group_layout =
+        let dynamic_transforms = DynamicTransforms::new();
+
+        let dynamic_transforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Dynamic Transforms"),
+                contents: bytemuck::cast_slice(&[dynamic_transforms]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bind_group_layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
@@ -158,29 +219,26 @@ impl WgpuRenderer {
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
                 ],
-                label: Some("texture_bind_group_layout"),
             });
 
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bind_group"),
+            layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                    resource: dynamic_transforms_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: 6,
                     resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                },
             ],
-            label: Some("diffuse_bind_group"),
         });
 
         let vertex_shader_module =
@@ -191,8 +249,8 @@ impl WgpuRenderer {
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layouy"),
-                bind_group_layouts: &[&texture_bind_group_layout],
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -211,6 +269,12 @@ impl WgpuRenderer {
             ),
         );
 
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: &[],
+            usage: wgpu::BufferUsages::VERTEX
+        });
+
         Ok(WgpuRenderer {
             filesystem,
             window,
@@ -220,7 +284,10 @@ impl WgpuRenderer {
             config,
             size,
             render_pipeline,
-            diffuse_bind_group,
+            vertex_buffer,
+            dynamic_transforms,
+            dynamic_transforms_buffer,
+            dynamic_transforms_bind_group: bind_group,
         })
     }
 
@@ -250,17 +317,18 @@ impl WgpuRenderer {
                             b: 0.3,
                             a: 1.0,
                         }),
-                        store: wgpu::StoreOp::Store,
+                        store: true,
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
+                // timestamp_writes: None,
+                // occlusion_query_set: None,
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-            render_pass.draw(0..3, 0..1);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_bind_group(0, &self.dynamic_transforms_bind_group, &[]);
+            render_pass.draw(0..0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -316,7 +384,7 @@ fn create_shader_module<P: AsRef<Path>, F: Fn(&str) -> (&str, &str)>(
         path.to_str().unwrap(),
         entry_point,
         target_profile,
-        &["-spirv"],
+        &["-spirv", "-Zs", "-Gec"],
         Some(&mut IncludeHandler { filesystem }),
         &[],
     ) {
@@ -332,6 +400,12 @@ fn create_shader_module<P: AsRef<Path>, F: Fn(&str) -> (&str, &str)>(
             Ok(result_blob.to_vec())
         }
     }?;
+
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(
+        path.with_file_name(path.file_name().unwrap().to_str().unwrap().to_owned() + ".spirv"),
+        &spirv,
+    )?;
 
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: shader_path.as_ref().to_str(),
