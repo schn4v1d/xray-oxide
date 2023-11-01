@@ -1,6 +1,5 @@
 use std::{
     fs::File,
-    hash::{Hash, Hasher},
     io::{BufReader, Cursor, Read, Seek},
     mem::size_of,
     path::{Path, PathBuf},
